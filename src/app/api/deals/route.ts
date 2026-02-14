@@ -8,8 +8,8 @@ export async function GET(request: Request) {
   const limit = parseInt(searchParams.get('limit') || '20')
 
   let deals = query 
-    ? searchDeals(query) 
-    : (profitable === 'true' ? getProfitableDeals() : getAllDeals())
+    ? await searchDeals(query) 
+    : (profitable === 'true' ? await getProfitableDeals() : await getAllDeals())
 
   deals = deals.slice(0, limit)
 

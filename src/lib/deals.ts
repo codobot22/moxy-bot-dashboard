@@ -1,8 +1,9 @@
 import { BookDeal } from './types'
 import { calculateProfit } from './utils'
+import { getMomoxPrice } from './momox'
 
-// Sample book deals - In production, this comes from Vinted scraping + Momox API
-const SAMPLE_DEALS: BookDeal[] = [
+// Demo data as fallback
+const DEMO_DEALS: BookDeal[] = [
   {
     id: '1',
     title: 'Harry Potter et l\'Enfant Maudit - J.K. Rowling',
@@ -102,32 +103,12 @@ const SAMPLE_DEALS: BookDeal[] = [
     },
     momoxPrice: 12.00,
     foundAt: new Date(Date.now() - 14400000).toISOString()
-  },
-  {
-    id: '6',
-    title: '1984 - George Orwell',
-    description: 'Science-fiction classique',
-    price: 4.50,
-    shippingCost: 2.99,
-    isbn: '9782070360028',
-    brand: 'Folio SF',
-    condition: 'Très bon',
-    photoUrl: 'https://images.unsplash.com/photo-1519681393784-d120267933ba?w=400',
-    vintedUrl: 'https://www.vinted.be/livres/123461',
-    seller: {
-      username: 'orwellfan',
-      positiveFeedback: 234,
-      negativeFeedback: 4,
-      location: 'Lille'
-    },
-    momoxPrice: 8.00,
-    foundAt: new Date(Date.now() - 18000000).toISOString()
   }
 ]
 
-// Calculate profit for all deals
-export function enrichDealsWithProfit(deals: BookDeal[]): BookDeal[] {
-  return deals.map(deal => {
+// Enrich demo deals with profit calculation
+function enrichDemoDeals(): BookDeal[] {
+  return DEMO_DEALS.map(deal => {
     const { profit, totalCost, protectionFee, isProfitable } = calculateProfit(
       deal.price,
       deal.shippingCost,
@@ -143,17 +124,105 @@ export function enrichDealsWithProfit(deals: BookDeal[]): BookDeal[] {
   })
 }
 
-export function getAllDeals(): BookDeal[] {
-  return enrichDealsWithProfit(SAMPLE_DEALS)
+// Vinted API integration (when available)
+async function fetchFromVintedAPI(): Promise<BookDeal[]> {
+  try {
+    // Vinted GraphQL API endpoint
+    const response = await fetch('https://www.vinted.fr/api/v2/items?catalog_ids=79&status=1,2&order=newest_first&per_page=20', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
+        'Accept': 'application/json',
+      },
+      next: { revalidate: 60 }
+    })
+
+    if (!response.ok) {
+      throw new Error(`Vinted API error: ${response.status}`)
+    }
+
+    const data = await response.json()
+    const deals: BookDeal[] = []
+
+    for (const item of data.items || []) {
+      const isbn = extractISBN(item.description || '')
+      const momoxPrice = isbn ? await getMomoxPrice(isbn) : 0
+      const shippingCost = item.shipping_price || 2.99
+      const { profit, totalCost, protectionFee, isProfitable } = calculateProfit(
+        item.price,
+        shippingCost,
+        momoxPrice
+      )
+
+      deals.push({
+        id: item.id.toString(),
+        title: item.title,
+        description: item.description || '',
+        price: item.price,
+        shippingCost,
+        isbn,
+        brand: item.brand_title,
+        condition: item.status === '1' ? 'Neuf' : 'Très bon',
+        photoUrl: item.photo_url,
+        vintedUrl: item.url,
+        seller: {
+          username: item.user.login,
+          positiveFeedback: item.user.positive_feedback_count,
+          negativeFeedback: item.user.negative_feedback_count,
+          location: item.user.city || item.user.country || 'France'
+        },
+        momoxPrice,
+        protectionFee,
+        totalCost,
+        profit,
+        isProfitable,
+        foundAt: new Date().toISOString()
+      })
+    }
+
+    return deals
+  } catch (error) {
+    console.error('Vinted API fetch failed:', error)
+    return []
+  }
 }
 
-export function getProfitableDeals(): BookDeal[] {
-  return getAllDeals().filter(deal => deal.isProfitable)
+function extractISBN(description: string): string {
+  const patterns = [
+    /ISBN[:\s]*(\d{10,13})/i,
+    /(\d{10,13})/,
+    /ean[:\s]*(\d{10,13})/i,
+  ]
+
+  for (const pattern of patterns) {
+    const match = description.match(pattern)
+    if (match) {
+      return match[1] || match[0]
+    }
+  }
+  return ''
 }
 
-export function searchDeals(query: string): BookDeal[] {
+export async function getAllDeals(): Promise<BookDeal[]> {
+  // Try Vinted API first
+  const vintedDeals = await fetchFromVintedAPI()
+  
+  // If Vinted API returns data, use it
+  if (vintedDeals.length > 0) {
+    return vintedDeals
+  }
+
+  // Fall back to demo data
+  return enrichDemoDeals()
+}
+
+export function getProfitableDeals(): Promise<BookDeal[]> {
+  return getAllDeals().then(deals => deals.filter(d => d.isProfitable))
+}
+
+export async function searchDeals(query: string): Promise<BookDeal[]> {
+  const deals = await getAllDeals()
   const lowerQuery = query.toLowerCase()
-  return getAllDeals().filter(deal => 
+  return deals.filter(deal => 
     deal.title.toLowerCase().includes(lowerQuery) ||
     deal.isbn.includes(query) ||
     deal.description.toLowerCase().includes(lowerQuery)
@@ -161,12 +230,11 @@ export function searchDeals(query: string): BookDeal[] {
 }
 
 export function calculateStats(deals: BookDeal[]) {
-  const enrichedDeals = enrichDealsWithProfit(deals)
-  const profitableDeals = enrichedDeals.filter(d => d.isProfitable)
-  const profits = enrichedDeals.map(d => d.profit || 0)
+  const profitableDeals = deals.filter(d => d.isProfitable)
+  const profits = deals.map(d => d.profit || 0)
 
   return {
-    totalDeals: enrichedDeals.length,
+    totalDeals: deals.length,
     profitableDeals: profitableDeals.length,
     totalPotentialProfit: profitableDeals.reduce((sum, d) => sum + (d.profit || 0), 0),
     averageProfit: profits.length > 0 
